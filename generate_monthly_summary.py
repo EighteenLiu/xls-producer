@@ -1,524 +1,647 @@
 # -*- coding: utf-8 -*-
 """
-生成（汇总）2026.4月各街道问题汇总.xlsx
-严格遵循已有参考模板的格式: D:\桌面\实习\月报表\（汇总）2026.4月各街道问题汇总.xlsx
+Generate the monthly street problem summary workbook.
 
-布局说明（转置格式）:
-  - A列: 序号
-  - B列: 分类名称（合并单元格）
-  - C列: 问题指标名称
-  - D~R列: 15个街道的数据
-  - 数据来源: 源台账文件的居民小区胡同/社会单位/餐饮单位/中转站sheet
+The source ledger and the reference summary template are kept unchanged.  This
+script copies the template workbook and only fills the street data cells in the
+generated copy.
 """
 
-import pandas as pd
-import numpy as np
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-import datetime
-import os, warnings
-warnings.filterwarnings('ignore')
+from __future__ import annotations
 
-SOURCE_FILE = r"D:\桌面\实习\月报表\1.2026-2027年早高峰时段各街道问题汇总台账（4.21开始含早晚非）(2).xlsx"
-OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "（汇总）2026.4月各街道问题汇总.xlsx")
+import math
+import re
+from copy import copy
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, time
+from pathlib import Path
+from typing import Callable
 
-BASE_DATE = datetime.datetime(1899, 12, 30)
-START_DATE = datetime.datetime(2026, 4, 20)
-END_DATE = datetime.datetime(2026, 5, 19, 23, 59, 59)
-START_SERIAL = (START_DATE - BASE_DATE).days
-END_SERIAL = (END_DATE - BASE_DATE).days
+from openpyxl import load_workbook
+from openpyxl.utils.datetime import from_excel
 
-ALL_STREETS = [
-    "德胜街道", "什刹海街道", "西长安街街道", "大栅栏街道",
-    "天桥街道", "新街口街道", "金融街街道", "椿树街道",
-    "陶然亭街道", "展览路街道", "月坛街道", "广内街道",
-    "牛街街道", "白纸坊街道", "广外街道"
-]
 
-# ============================================================
-# 数据加载与预计算
-# ============================================================
-def load_and_filter(sheet_name, header_row):
-    """读取sheet并筛选日期范围"""
-    df = pd.read_excel(SOURCE_FILE, sheet_name=sheet_name, header=header_row)
-    
-    def is_in_range(val):
-        if pd.isna(val):
-            return False
-        if isinstance(val, (int, float)):
-            return START_SERIAL <= val <= END_SERIAL
-        if isinstance(val, datetime.datetime):
-            return START_DATE <= val <= END_DATE
-        return False
-    
-    mask = df.iloc[:, 0].apply(is_in_range)
-    return df[mask].copy()
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
 
-def get_street_sum(df, col_idx_excel):
-    """按街道求和（0-indexed列索引）"""
-    street_col = df.columns[1]  # 街道列
-    data_col = df.columns[col_idx_excel]
-    df_temp = df[[street_col, data_col]].copy()
-    df_temp[data_col] = pd.to_numeric(df_temp[data_col], errors='coerce').fillna(0)
-    result = df_temp.groupby(street_col)[data_col].sum()
-    result.index = result.index.astype(str)
-    return [int(result.get(s, 0)) for s in ALL_STREETS]
+SOURCE_PREFIX = "1.2026-2027年早高峰时段各街道问题汇总台账"
+TEMPLATE_SHEETS = ["Sheet1", "Sheet2"]
+DEFAULT_OUTPUT_NAME = "（汇总）2026.5月各街道问题汇总.xlsx"
 
-def get_street_count(df):
-    """按街道统计记录数"""
-    street_col = df.columns[1]
-    counts = df.groupby(street_col).size()
-    counts.index = counts.index.astype(str)
-    return [int(counts.get(s, 0)) for s in ALL_STREETS]
+START_DATE = datetime(2026, 4, 20, 0, 0, 0)
+END_DATE = datetime(2026, 5, 19, 23, 59, 59)
 
-def get_rectified_stats(df, col_idx_excel):
-    """统计已整改/未整改数"""
-    street_col = df.columns[1]
-    rect_col = df.columns[col_idx_excel]
-    df_temp = df[[street_col, rect_col]].copy()
-    df_temp[rect_col] = pd.to_numeric(df_temp[rect_col], errors='coerce')
-    
-    rectified = df_temp[df_temp[rect_col] == 0].groupby(street_col).size()
-    unrectified = df_temp[df_temp[rect_col] == 1].groupby(street_col).size()
-    rectified.index = rectified.index.astype(str)
-    unrectified.index = unrectified.index.astype(str)
-    
-    rect_arr = [int(rectified.get(s, 0)) for s in ALL_STREETS]
-    unrect_arr = [int(unrectified.get(s, 0)) for s in ALL_STREETS]
-    
-    rate_arr = []
-    for r, u in zip(rect_arr, unrect_arr):
-        total = r + u
-        rate_arr.append(round(r / total, 4) if total > 0 else 1.0)
-    
-    return rect_arr, unrect_arr, rate_arr
 
-def calc_rate(numerator_col, denominator_col, df):
-    """计算比率"""
-    street_col = df.columns[1]
-    num = pd.to_numeric(df[df.columns[numerator_col]], errors='coerce').fillna(0)
-    den = pd.to_numeric(df[df.columns[denominator_col]], errors='coerce').fillna(0)
-    df_temp = pd.DataFrame({street_col: df[street_col], "num": num, "den": den})
-    result = df_temp.groupby(street_col).sum()
-    rates = []
-    for s in ALL_STREETS:
-        if s in result.index:
-            n = result.loc[s, "num"]
-            d = result.loc[s, "den"]
-            rates.append(round(1 - n/d, 4) if d > 0 else 1.0)
-        else:
-            rates.append(1.0)
-    return rates
+def clean_text(value) -> str:
+    text = "" if value is None else str(value)
+    text = text.replace("\n", "").replace("\r", "")
+    text = re.sub(r"\s+", "", text)
+    return text.strip()
 
-print("加载数据...")
-df_resident = load_and_filter("居民小区胡同", 1)
-df_social = load_and_filter("社会单位", 0)
-df_food = load_and_filter("餐饮单位", 0)
-df_transfer = load_and_filter("中转站", 0)   # 本月无数据
-print(f"加载完成: 居民小区={len(df_resident)}, 社会单位={len(df_social)}, 餐饮单位={len(df_food)}, 中转站={len(df_transfer)}")
 
-# ---- 预计算所有需要的数据 ----
-# 居民小区数据
-rd = {}  # resident data
-for col_idx, name in [(5, "col6"), (6, "col7"), (7, "col8"), (8, "col9"),
-                       (10, "col11"), (11, "col12"), (12, "col13"), (13, "col14"),
-                       (16, "col17"), (17, "col18"), (18, "col19"), (19, "col20"),
-                       (20, "col21"), (21, "col22"), (22, "col23"), (23, "col24"),
-                       (24, "col25"), (28, "col29"), (30, "col31"), (32, "col33"),
-                       (34, "col35"), (35, "col36"), (36, "col37"), (37, "col38"),
-                       (40, "col41"), (41, "col42"), (43, "col44"), (44, "col45"),
-                       (46, "col47"), (50, "col51"), (51, "col52")]:
-    rd[name] = get_street_sum(df_resident, col_idx)
+def metric_key(value) -> str:
+    text = clean_text(value)
+    text = text.replace("设桶", "摆桶")
+    text = text.replace("未更新新国际", "未更新新国标")
+    text = text.replace("未更新新國際", "未更新新国标")
+    text = text.replace("容器标识不合格数", "容器标识不合格")
+    text = text.replace("容器无标识或标识不合格数", "容器无标识或标识不合格")
+    text = text.replace("无称重计量列表", "无称重计量")
+    text = text.replace("无称重计量小程序", "无称重计量")
+    text = text.replace("厨余、其他容器", "厨余和其他容器")
+    text = text.replace("周边不洁", "周边不洁")
+    return text
 
-# 特殊列 - 桶站组数/容器总数/居民投放数（月报告列）
-rd["col32"] = get_street_sum(df_resident, 31)  # 桶站组数
-rd["col43"] = get_street_sum(df_resident, 42)  # 容器总数
-rd["col46"] = get_street_sum(df_resident, 45)  # 居民投放数
 
-# 检查次数
-check_count_resident = get_street_count(df_resident)
+def street_key(value) -> str:
+    text = clean_text(value)
+    if not text:
+        return ""
+    aliases = {
+        "西长安街": "西长安街街道",
+        "什刹海街道": "什刹海街道",
+    }
+    if text in aliases:
+        text = aliases[text]
+    if not text.endswith("街道"):
+        text = f"{text}街道"
+    return text
 
-# 整改统计
-rd["rectified"], rd["unrectified"], rd["rectify_rate"] = get_rectified_stats(df_resident, 59)
 
-# 投放准确率: 1 - 居民自主投放不准确/居民投放数
-resident_input = rd["col46"]
-resident_wrong = rd["col47"]
-rd["accuracy"] = [round(1 - w/i, 4) if i > 0 else 1.0 for w, i in zip(resident_wrong, resident_input)]
+def to_datetime(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return from_excel(value)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                return datetime.combine(parsed.date(), time.min)
+            except ValueError:
+                pass
+    return None
 
-# 桶内分类纯净率: 1 - 桶内分类不纯净/检查容器总数
-rd["purity"] = calc_rate(43, 42, df_resident)  # col44/col43
 
-# 值守率: 1 - 无人值守记录数/总记录数
-unattended_count = []
-street_col_r = df_resident.columns[1]
-for s in ALL_STREETS:
-    subset = df_resident[df_resident[street_col_r] == s]
-    total = len(subset)
-    if total > 0:
-        unat = pd.to_numeric(subset[subset.columns[32]], errors='coerce').notna().sum()  # 列33无人值守
-        unattended_count.append(round(1 - unat/total, 4))
-    else:
-        unattended_count.append(1.0)
-rd["attendance_rate"] = unattended_count
+def parse_ui_date(value: str, end_of_day: bool = False) -> datetime:
+    parsed = datetime.strptime(value, "%Y-%m-%d")
+    if end_of_day:
+        return datetime.combine(parsed.date(), time.max.replace(microsecond=0))
+    return datetime.combine(parsed.date(), time.min)
 
-# 社会单位数据
-sd = {}
-for col_idx, name in [(3, "col4"), (4, "col5"), (5, "col6"), (6, "col7"),
-                       (7, "col8"), (8, "col9"), (9, "col10"), (10, "col11"),
-                       (11, "col12"), (12, "col13"), (13, "col14"), (14, "col15"),
-                       (15, "col16"), (16, "col17"), (17, "col18"), (18, "col19"),
-                       (19, "col20"), (20, "col21"), (21, "col22"), (22, "col23"),
-                       (23, "col24"), (24, "col25"), (25, "col26"), (26, "col27"),
-                       (27, "col28"), (28, "col29"), (29, "col30"), (30, "col31"),
-                       (31, "col32"), (32, "col33"), (33, "col34"), (34, "col35"), (35, "col36")]:
-    sd[name] = get_street_sum(df_social, col_idx)
 
-# 社会单位检查问题总数
-sd_keys = [k for k in sd.keys()]
-sd["total"] = [sum(sd[k][j] for k in sd_keys) for j in range(15)]
+def output_name_for(end_date: datetime) -> str:
+    return f"（汇总）{end_date.year}.{end_date.month}月各街道问题汇总.xlsx"
 
-# 餐饮单位数据
-fd = {}
-for col_idx, name in [(3, "col4"), (4, "col5"), (5, "col6"), (6, "col7"),
-                       (7, "col8"), (8, "col9"), (9, "col10"), (10, "col11"),
-                       (11, "col12"), (12, "col13"), (13, "col14"), (14, "col15"),
-                       (15, "col16"), (16, "col17"), (17, "col18"), (18, "col19"),
-                       (19, "col20"), (20, "col21"), (21, "col22"), (22, "col23"),
-                       (23, "col24"), (24, "col25"), (25, "col26"), (26, "col27"),
-                       (27, "col28"), (28, "col29"), (29, "col30"), (30, "col31")]:
-    fd[name] = get_street_sum(df_food, col_idx)
 
-fd_keys = [k for k in fd.keys()]
-fd["total"] = [sum(fd[k][j] for k in fd_keys) for j in range(15)]
+def number(value) -> float:
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and math.isnan(value):
+            return 0.0
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except ValueError:
+        return 0.0
 
-# 中转站（本月无数据，全0）
-transfer_zero = [0] * 15
 
-print("数据预计算完成")
+def find_source_file() -> Path:
+    candidates = [
+        path
+        for path in DATA_DIR.glob("*.xlsx")
+        if not path.name.startswith("~$") and path.name.startswith(SOURCE_PREFIX)
+    ]
+    if not candidates:
+        raise FileNotFoundError(f"未找到源台账文件: {DATA_DIR / (SOURCE_PREFIX + '*.xlsx')}")
+    return candidates[0]
 
-# ============================================================
-# 模板行定义（完全参照参考模板）
-# ============================================================
-# 每行: (A序号, B分类, C指标名, 数据获取函数(街道索引->值))
-# 如果是合计行，data_func=None，通过后续行自动计算
 
-class RowDef:
-    def __init__(self, seq, category, indicator, data_func=None, is_total=False, is_rate=False):
-        self.seq = seq        # A列序号
-        self.category = category  # B列分类
-        self.indicator = indicator  # C列指标名
-        self.data_func = data_func  # 函数: i(0-14) -> value
-        self.is_total = is_total
-        self.is_rate = is_rate
+def find_template_file() -> Path:
+    for path in DATA_DIR.glob("*.xlsx"):
+        if path.name.startswith("~$") or path.name.endswith("_生成.xlsx"):
+            continue
+        wb = load_workbook(path, read_only=True, data_only=False)
+        if wb.sheetnames == TEMPLATE_SHEETS:
+            return path
+    raise FileNotFoundError("未找到包含 Sheet1/Sheet2 的汇总模板文件")
 
-def row_defs_builder():
-    rows = []
-    
-    # ===== 分类设施建设达标情况 (Row2-Row22) =====
-    rows.append(RowDef(1, "分类设施建设达标情况", "合计", is_total=True))
-    rows.append(RowDef(2, None, "无宣传氛围", lambda i: rd["col6"][i]))
-    rows.append(RowDef(3, None, "无小区公示牌", lambda i: rd["col7"][i]))
-    rows.append(RowDef(4, None, "小区公示牌设置不合格", lambda i: rd["col8"][i]))
-    rows.append(RowDef(5, None, "未设置大件、装修垃圾投放点", lambda i: rd["col9"][i]))
-    rows.append(RowDef(6, None, "大件、装修垃圾投放点无公示牌或公示牌不合格", lambda i: rd["col11"][i]))
-    rows.append(RowDef(7, None, "无桶站公示牌或桶站公示牌设置不合格", lambda i: rd["col12"][i]))
-    rows.append(RowDef(8, None, "厨余、其他垃圾和可回收物桶未成组配备", lambda i: rd["col13"][i]))
-    rows.append(RowDef(9, None, "桶站公示牌破损", lambda i: rd["col14"][i]))
-    rows.append(RowDef(10, None, "高峰时段未开盖", lambda i: rd["col17"][i]))
-    rows.append(RowDef(11, None, "无便利性措施或便利性措施损坏", lambda i: rd["col18"][i]))
-    rows.append(RowDef(12, None, "四分类桶设置不齐全", lambda i: rd["col19"][i]))
-    rows.append(RowDef(13, None, "无标识、标识不符、脱落、破损等容器", lambda i: rd["col20"][i]))
-    rows.append(RowDef(14, None, "容器颜色不符", lambda i: rd["col21"][i]))
-    rows.append(RowDef(15, None, "容器不符、缺盖或破损", lambda i: rd["col22"][i]))
-    rows.append(RowDef(16, None, "无防雨棚", lambda i: rd["col23"][i]))
-    rows.append(RowDef(17, None, "容器脏污", lambda i: rd["col24"][i]))
-    rows.append(RowDef(18, None, "未铺设地垫", lambda i: 0))
-    rows.append(RowDef(19, None, "地垫破损", lambda i: 0))
-    rows.append(RowDef(20, None, "无灭蝇措施", lambda i: rd["col29"][i]))
-    rows.append(RowDef(21, None, "站外设桶", lambda i: rd["col45"][i]))
-    
-    # ===== 中转站 (Row23-Row25) =====
-    rows.append(RowDef(22, "中转站", "称重系统损坏", lambda i: transfer_zero[i]))
-    rows.append(RowDef(23, None, "灭火器不合格", lambda i: transfer_zero[i]))
-    rows.append(RowDef(24, None, "无消防安全水源", lambda i: transfer_zero[i]))
-    
-    # ===== 分类设施管理达标情况 (Row26-Row43) =====
-    rows.append(RowDef(28, "分类设施管理达标情况", "合计", is_total=True))
-    rows.append(RowDef(29, None, "大件、装修垃圾投放点存放其他品类垃圾", lambda i: 0))
-    rows.append(RowDef(30, None, "大件、装修垃圾投放点未分区存放", lambda i: 0))
-    rows.append(RowDef(31, None, "大件、装修垃圾投放点周边环境脏乱", lambda i: 0))
-    rows.append(RowDef(None, None, "小区内无大件垃圾托底上门回收渠道公示或告知", lambda i: 0))
-    rows.append(RowDef(32, None, "桶站周边不洁", lambda i: rd["col25"][i]))
-    rows.append(RowDef(33, None, "桶站地面脏污", lambda i: rd["col31"][i]))
-    rows.append(RowDef(34, None, "无人值守", lambda i: rd["col33"][i]))
-    rows.append(RowDef(35, None, "容器脏污", lambda i: rd["col24"][i]))
-    rows.append(RowDef(36, None, "值守人员未履行职责", lambda i: rd["col35"][i]))
-    rows.append(RowDef(37, None, "容器满冒", lambda i: rd["col36"][i]))
-    rows.append(RowDef(38, None, "垃圾积存", lambda i: rd["col37"][i]))
-    rows.append(RowDef(39, None, "垃圾清运不及时", lambda i: rd["col41"][i]))
-    rows.append(RowDef(40, None, "小区垃圾乱堆乱放", lambda i: rd["col42"][i]))
-    rows.append(RowDef(None, None, "散桶", lambda i: rd["col38"][i]))
-    rows.append(RowDef(41, None, "桶内分类不纯净", lambda i: rd["col44"][i]))
-    rows.append(RowDef(42, None, "车辆未密闭、破损滴漏脏污，标志与车牌不清晰", lambda i: rd["col51"][i]))
-    rows.append(RowDef(43, None, "发现混装混运、随意倾倒、丢弃、遗撒、堆放垃圾", lambda i: rd["col52"][i]))
-    
-    # ===== 中转站2 (Row44-Row50) =====
-    rows.append(RowDef(55, "中转站", "周边环境脏乱", lambda i: transfer_zero[i]))
-    rows.append(RowDef(56, None, "无备案公示", lambda i: transfer_zero[i]))
-    rows.append(RowDef(57, None, "未按规定区域存放物品", lambda i: transfer_zero[i]))
-    rows.append(RowDef(58, None, "清运不及时、可回收物大量积存", lambda i: transfer_zero[i]))
-    rows.append(RowDef(59, None, "安全员未按时上岗", lambda i: transfer_zero[i]))
-    rows.append(RowDef(None, None, "安全员无明显身份标识", lambda i: transfer_zero[i]))
-    rows.append(RowDef(60, None, "无企安安", lambda i: transfer_zero[i]))
-    
-    # ===== 居民自主投放情况 (Row51-Row52) =====
-    rows.append(RowDef(61, "居民自主投放情况", "居民自主投放不准确", lambda i: rd["col47"][i]))
-    rows.append(RowDef(62, None, "投放准确率", lambda i: rd["accuracy"][i], is_rate=True))
-    
-    # ===== 纯净率/值守率/桶站组数/整改情况 (Row53-Row59) =====
-    rows.append(RowDef(63, "纯净率", "桶内分类纯净率", lambda i: rd["purity"][i], is_rate=True))
-    rows.append(RowDef(64, "值守率", "值守率", lambda i: rd["attendance_rate"][i], is_rate=True))
-    rows.append(RowDef(65, "检查小区桶站组数", None, lambda i: rd["col32"][i]))
-    rows.append(RowDef(66, "居民小区问题整改情况", "居民小区、胡同整改率", lambda i: rd["rectify_rate"][i], is_rate=True))
-    rows.append(RowDef(67, None, "检查数", lambda i: check_count_resident[i]))
-    rows.append(RowDef(68, None, "已整改数", lambda i: rd["rectified"][i]))
-    rows.append(RowDef(69, None, "未整改数", lambda i: rd["unrectified"][i]))
-    
-    # ===== 社会单位检查情况 (Row60-Row88) =====
-    rows.append(RowDef(70, "社会单位检查情况", "社会单位检查问题数", lambda i: sd["total"][i]))
-    rows.append(RowDef(71, None, "无党建引领相关资料", lambda i: sd["col4"][i]))
-    rows.append(RowDef(72, None, "无培训活动、会议记录、照片等培训材料", lambda i: sd["col5"][i]))
-    rows.append(RowDef(73, None, "无适量点餐、光盘行动等宣传内容", lambda i: sd["col6"][i]))
-    rows.append(RowDef(74, None, "单位无容器配置或容器配置不全", lambda i: sd["col7"][i]))
-    rows.append(RowDef(75, None, "未设置分类投放指引数（组数）", lambda i: sd["col8"][i]))
-    rows.append(RowDef(76, None, "公共场所区域(办公楼外区域、办事大厅等)未成组设置可回收物和其他容器数（组数）", lambda i: sd["col9"][i]))
-    rows.append(RowDef(77, None, "容器无便利性措施", lambda i: sd["col12"][i]))
-    rows.append(RowDef(78, None, "未更新新国际", lambda i: sd["col13"][i]))
-    rows.append(RowDef(79, None, "容器垃圾不纯净", lambda i: sd["col14"][i]))
-    rows.append(RowDef(80, None, "容器标识不合格数", lambda i: sd["col18"][i]))
-    rows.append(RowDef(None, None, "桶站满冒", lambda i: sd["col15"][i]))
-    rows.append(RowDef(None, None, "桶站周边不洁", lambda i: sd["col16"][i]))
-    rows.append(RowDef(81, None, "无宣传氛围", lambda i: sd["col19"][i]))
-    rows.append(RowDef(82, None, "集中用餐区未成组设置厨余和其他垃圾容器数", lambda i: sd["col20"][i]))
-    rows.append(RowDef(83, None, "食品加工区厨余、其他容器设置不齐", lambda i: sd["col21"][i]))
-    rows.append(RowDef(84, None, "无油水分离装置", lambda i: sd["col22"][i]))
-    rows.append(RowDef(85, None, "无厨余垃圾收运合同或不合格", lambda i: sd["col23"][i]))
-    rows.append(RowDef(86, None, "无其他垃圾收运合同或不合格", lambda i: sd["col24"][i]))
-    rows.append(RowDef(87, None, "无可回收物收运合同或不合格", lambda i: sd["col25"][i]))
-    rows.append(RowDef(88, None, "无有害垃圾收运合同或不合格", lambda i: sd["col26"][i]))
-    rows.append(RowDef(89, None, "无源头减量措施", lambda i: sd["col29"][i]))
-    rows.append(RowDef(90, None, "无非居民其他垃圾排放登记方式", lambda i: sd["col28"][i]))
-    rows.append(RowDef(91, None, "无废弃油脂合同或不合格", lambda i: sd["col30"][i]))
-    rows.append(RowDef(92, None, "无垃圾分类工作方案", lambda i: sd["col31"][i]))
-    rows.append(RowDef(93, None, "职责分工不明确", lambda i: sd["col32"][i]))
-    rows.append(RowDef(94, None, "无四分类垃圾清运台账或四分类清运台账不合格", lambda i: sd["col33"][i]))
-    rows.append(RowDef(95, None, "无称重计量列表", lambda i: sd["col34"][i]))
-    rows.append(RowDef(96, None, "无油水分离装置", lambda i: sd["col35"][i]))
-    
-    # ===== 餐饮单位检查情况 (Row89-Row110) =====
-    rows.append(RowDef(101, "餐饮单位检查情况", "餐饮单位检查问题数", lambda i: fd["total"][i]))
-    rows.append(RowDef(102, None, "无适量点餐、光盘行动等宣传内容", lambda i: fd["col4"][i]))
-    rows.append(RowDef(103, None, "集中用餐区未成组设置厨余和其他垃圾容器数", lambda i: fd["col5"][i]))
-    rows.append(RowDef(104, None, "后厨未成组设置垃圾桶", lambda i: fd["col6"][i]))
-    rows.append(RowDef(105, None, "容器无标识或标识不合格数", lambda i: fd["col10"][i]))
-    rows.append(RowDef(106, None, "无便利性措施", lambda i: fd["col11"][i]))
-    rows.append(RowDef(107, None, "无宣传氛围", lambda i: fd["col13"][i]))
-    rows.append(RowDef(108, None, "容器破损、脏污等", lambda i: fd["col14"][i]))
-    rows.append(RowDef(109, None, "无油水分离装置", lambda i: fd["col15"][i]))
-    rows.append(RowDef(110, None, "无垃圾分类投放指引", lambda i: fd["col16"][i]))
-    rows.append(RowDef(111, None, "无厨余垃圾收运合同或不合格", lambda i: fd["col17"][i]))
-    rows.append(RowDef(112, None, "无其他垃圾收运合同或不合格", lambda i: fd["col18"][i]))
-    rows.append(RowDef(113, None, "无厨余垃圾排放登记方式", lambda i: fd["col19"][i]))
-    rows.append(RowDef(114, None, "无非居民其他垃圾排放登记方式", lambda i: fd["col20"][i]))
-    rows.append(RowDef(115, None, "无称重计量小程序", lambda i: fd["col21"][i]))
-    rows.append(RowDef(116, None, "无源头减量措施", lambda i: fd["col22"][i]))
-    rows.append(RowDef(117, None, "厨余垃圾桶外摆", lambda i: fd["col23"][i]))
-    rows.append(RowDef(118, None, "容器垃圾不纯净", lambda i: fd["col24"][i]))
-    rows.append(RowDef(119, None, "无废弃油脂合同或不合格", lambda i: fd["col25"][i]))
-    rows.append(RowDef(120, None, "无容器设置", lambda i: fd["col27"][i]))
-    rows.append(RowDef(121, None, "无收费计量记录", lambda i: fd["col29"][i]))
-    rows.append(RowDef(122, None, "无隔油池", lambda i: fd["col30"][i]))
-    
-    # ===== 市级检查情况 (Row111-Row113) =====
-    rows.append(RowDef(127, "市级检查情况", "检查小区数", lambda i: 0))
-    rows.append(RowDef(128, None, "检查社会单位数", lambda i: 0))
-    rows.append(RowDef(129, None, "市级检查问题数", lambda i: 0))
-    
-    return rows
 
-rows = row_defs_builder()
+@dataclass
+class SourceSheet:
+    name: str
+    headers: list[str]
+    rows: list[tuple]
+    indicator_indexes: list[int]
+    date_index: int = 0
+    street_index: int = 1
+    rectified_index: int | None = None
+    resident_vote_total_index: int | None = None
+    resident_bin_total_index: int | None = None
+    resident_station_group_index: int | None = None
 
-# ============================================================
-# 计算合计行
-# ============================================================
-# 找出每个分类下的合计行索引和为它提供数据的范围
-total_indices = [i for i, r in enumerate(rows) if r.is_total]
-for ti in total_indices:
-    cat = rows[ti].category
-    # 从ti+1开始，直到遇到下一个分类或结束
-    end = len(rows)
-    for j in range(ti + 1, len(rows)):
-        if rows[j].category is not None and not rows[j].is_total:
-            end = j
-            break
-    # 计算合计
-    detail_rows = rows[ti+1:end]
-    def make_total_func(details):
-        def func(i):
-            total = 0
-            for dr in details:
-                if dr.data_func and not dr.is_rate:
-                    total += dr.data_func(i)
-            return total
-        return func
-    rows[ti].data_func = make_total_func(detail_rows)
+    @property
+    def header_map(self) -> dict[str, list[int]]:
+        mapping: dict[str, list[int]] = defaultdict(list)
+        for idx, header in enumerate(self.headers):
+            if header:
+                mapping[metric_key(header)].append(idx)
+        return mapping
 
-# ============================================================
-# 写入Excel
-# ============================================================
-print("写入Excel...")
-wb = Workbook()
-ws = wb.active
-ws.title = "Sheet1"
+    def sum_metric(self, street: str, metric: str) -> float | None:
+        indexes = self.header_map.get(metric_key(metric), [])
+        if not indexes:
+            return None
+        total = 0.0
+        wanted = street_key(street)
+        for row in self.rows:
+            if street_key(row[self.street_index]) != wanted:
+                continue
+            total += sum(number(row[idx]) for idx in indexes if idx < len(row))
+        return total
 
-# 样式
-title_font = Font(name="仿宋", size=16, bold=False)
-header_font = Font(name="仿宋", size=12, bold=False)
-data_font = Font(name="仿宋", size=12)
-center_align = Alignment(horizontal="center", vertical="center")
-thin_border = Border(
-    left=Side(style='thin'), right=Side(style='thin'),
-    top=Side(style='thin'), bottom=Side(style='thin')
-)
+    def sum_indexes(self, street: str, indexes: list[int]) -> float:
+        total = 0.0
+        wanted = street_key(street)
+        for row in self.rows:
+            if street_key(row[self.street_index]) != wanted:
+                continue
+            total += sum(number(row[idx]) for idx in indexes if idx < len(row))
+        return total
 
-# Row1: 表头
-ws.cell(row=1, column=1).value = None
-ws.cell(row=1, column=2).value = None
-ws.cell(row=1, column=3).value = "街道名称"
-ws.cell(row=1, column=3).font = Font(name="仿宋", size=12)
-ws.cell(row=1, column=3).alignment = center_align
-ws.cell(row=1, column=3).border = thin_border
+    def issue_total(self, street: str) -> float:
+        return self.sum_indexes(street, self.indicator_indexes)
 
-for j, street in enumerate(ALL_STREETS):
-    cell = ws.cell(row=1, column=4+j, value=street)
-    cell.font = header_font
-    cell.alignment = center_align
-    cell.border = thin_border
+    def row_count(self, street: str) -> int:
+        wanted = street_key(street)
+        return sum(1 for row in self.rows if street_key(row[self.street_index]) == wanted)
 
-# 填充数据行
-# 合并单元格（按固定区域）
+    def date_street_count(self, street: str) -> int:
+        wanted = street_key(street)
+        pairs = {
+            to_datetime(row[self.date_index]).date()
+            for row in self.rows
+            if street_key(row[self.street_index]) == wanted and to_datetime(row[self.date_index]) is not None
+        }
+        return len(pairs)
 
-for i, rdef in enumerate(rows):
-    row_num = i + 2  # Excel行号（从第2行开始）
-    
-    # A列 - 序号
-    if rdef.seq is not None:
-        cell = ws.cell(row=row_num, column=1, value=rdef.seq)
-        cell.font = data_font
-        cell.alignment = center_align
-        cell.border = thin_border
-    
-    # B列 - 分类（单行也设置完整边框）
-    if rdef.category is not None:
-        cell = ws.cell(row=row_num, column=2, value=rdef.category)
-        cell.font = data_font
-        cell.alignment = center_align
-        cell.border = thin_border
-    else:
-        # 确保非分类行B列也有边框
-        cell = ws.cell(row=row_num, column=2)
-        cell.border = thin_border
-    
-    # C列 - 指标名称
-    if rdef.indicator is not None:
-        cell = ws.cell(row=row_num, column=3, value=rdef.indicator)
-        cell.font = data_font
-        cell.alignment = center_align
-        cell.border = thin_border
-    elif rdef.category is not None and rdef.indicator is None:
-        # 一些行有分类但没有指标（如"检查小区桶站组数"行）
-        pass
-    
-    # D~R列 - 数据
-    if rdef.data_func:
-        for j in range(15):
-            val = rdef.data_func(j)
-            cell = ws.cell(row=row_num, column=4+j)
-            if rdef.is_rate:
-                cell.value = val
-                cell.number_format = '0.0000' if isinstance(val, float) else '0'
+    def default_resident_vote_total(self, street: str) -> int:
+        return self.row_count(street) * 5
+
+    def point_count(self, street: str, point_index: int = 2) -> int:
+        wanted = street_key(street)
+        points = {
+            clean_text(row[point_index])
+            for row in self.rows
+            if len(row) > point_index and street_key(row[self.street_index]) == wanted and clean_text(row[point_index])
+        }
+        return len(points)
+
+    def rectified_issue_totals(self, street: str) -> tuple[float, float]:
+        if self.rectified_index is None:
+            return 0.0, 0.0
+        wanted = street_key(street)
+        done = 0.0
+        undone = 0.0
+        for row in self.rows:
+            if street_key(row[self.street_index]) != wanted:
+                continue
+            issue_count = sum(number(row[idx]) for idx in self.indicator_indexes if idx < len(row))
+            rectified_value = number(row[self.rectified_index]) if self.rectified_index < len(row) else 0
+            if rectified_value == 1:
+                undone += issue_count
             else:
-                cell.value = val if val != 0 else 0  # 保持0值
-            cell.font = data_font
-            cell.alignment = center_align
-            cell.border = thin_border
+                done += issue_count
+        return done, undone
 
-# 合并分类单元格（按连续区域，参考模板格式）
-merge_regions = [
-    (2, 22),   # 分类设施建设达标情况
-    (23, 25),  # 中转站
-    (26, 43),  # 分类设施管理达标情况
-    (44, 50),  # 中转站
-    (51, 52),  # 居民自主投放情况
-    (53, 53),  # 纯净率
-    (54, 54),  # 值守率
-    (55, 55),  # 检查小区桶站组数
-    (56, 59),  # 居民小区问题整改情况
-    (60, 88),  # 社会单位检查情况
-    (89, 110), # 餐饮单位检查情况
-    (111, 113),# 市级检查情况
-]
-for start, end in merge_regions:
-    if end > start:
-        ws.merge_cells(start_row=start, start_column=2, end_row=end, end_column=2)
+    def rectified_record_totals(self, street: str) -> tuple[float, float]:
+        if self.rectified_index is None:
+            return 0.0, 0.0
+        wanted = street_key(street)
+        done = 0.0
+        undone = 0.0
+        for row in self.rows:
+            if street_key(row[self.street_index]) != wanted:
+                continue
+            issue_count = sum(number(row[idx]) for idx in self.indicator_indexes if idx < len(row))
+            if issue_count == 0:
+                continue
+            rectified_value = number(row[self.rectified_index]) if self.rectified_index < len(row) else 0
+            if rectified_value == 1:
+                undone += 1
+            else:
+                done += 1
+        return done, undone
 
-# 设置列宽
-ws.column_dimensions['A'].width = 6
-ws.column_dimensions['B'].width = 22
-ws.column_dimensions['C'].width = 52
-for j in range(15):
-    ws.column_dimensions[get_column_letter(4+j)].width = 12
 
-print(f"写入完成: {len(rows)}行数据")
+def load_source_sheet(ws, sheet_order: int, start_date: datetime, end_date: datetime) -> SourceSheet:
+    header_row = 2 if sheet_order == 0 else 1
+    headers = [clean_text(ws.cell(header_row, col).value) for col in range(1, ws.max_column + 1)]
+    raw_rows = ws.iter_rows(min_row=header_row + 1, values_only=True)
+    rows = []
+    for row in raw_rows:
+        checked_at = to_datetime(row[0] if row else None)
+        if checked_at and start_date <= checked_at <= end_date:
+            rows.append(row)
 
-# ============================================================
-# Sheet2: 居民自主投放情况明细
-# ============================================================
-ws2 = wb.create_sheet(title="Sheet2")
+    # Excel column numbers converted to 0-based indexes.  These ranges come
+    # from the ledger structure and exclude monthly-report helper columns.
+    indicator_ranges_by_order = {
+        0: [(6, 31), (33, 42), (44, 45), (47, 58)],
+        1: [(4, 36)],
+        2: [(4, 31)],
+        3: [(4, 33)],
+        4: [(5, 23)],
+        5: [(4, 13)],
+        6: [(4, 8)],
+    }
+    ranges = indicator_ranges_by_order[sheet_order]
+    indicator_indexes = [col - 1 for start, end in ranges for col in range(start, end + 1)]
 
-ws2.cell(row=1, column=1, value="街道名称").font = Font(name="宋体", size=11)
-ws2.cell(row=1, column=2, value="求和项:居民自主投放不准确").font = Font(name="宋体", size=11)
-ws2.cell(row=1, column=3, value="平均值项:准确率").font = Font(name="宋体", size=11)
-for col_idx in range(1, 4):
-    ws2.cell(row=1, column=col_idx).alignment = center_align
-    ws2.cell(row=1, column=col_idx).border = thin_border
+    def first_header_contains(keyword: str) -> int | None:
+        return next((idx for idx, header in enumerate(headers) if keyword in header), None)
 
-for j, street in enumerate(ALL_STREETS):
-    row_num = j + 2
-    ws2.cell(row=row_num, column=1, value=street).border = thin_border
-    ws2.cell(row=row_num, column=1).alignment = Alignment(vertical="center")
-    ws2.cell(row=row_num, column=2, value=rd["col47"][j]).border = thin_border
-    ws2.cell(row=row_num, column=2).alignment = center_align
-    ws2.cell(row=row_num, column=3, value=rd["accuracy"][j]).border = thin_border
-    ws2.cell(row=row_num, column=3).number_format = '0.0000'
-    ws2.cell(row=row_num, column=3).alignment = center_align
+    sheet = SourceSheet(
+        name=ws.title,
+        headers=headers,
+        rows=rows,
+        indicator_indexes=indicator_indexes,
+        rectified_index=first_header_contains("整改情况"),
+    )
+    if sheet_order == 0:
+        sheet.resident_station_group_index = 31
+        sheet.resident_bin_total_index = 42
+        sheet.resident_vote_total_index = 45
+    return sheet
 
-# 总计行
-ws2.cell(row=17, column=1, value="总计").border = thin_border
-ws2.cell(row=17, column=1).font = Font(name="宋体", size=11, bold=True)
-ws2.cell(row=17, column=2, value=sum(rd["col47"])).border = thin_border
-total_acc = round(sum(rd["col47"]) / sum(rd["col46"]), 4) if sum(rd["col46"]) > 0 else 0
-ws2.cell(row=17, column=3, value=total_acc).border = thin_border
-ws2.cell(row=17, column=3).number_format = '0.0000'
 
-ws2.column_dimensions['A'].width = 14
-ws2.column_dimensions['B'].width = 26
-ws2.column_dimensions['C'].width = 18
+def load_source_data(source_file: Path, start_date: datetime = START_DATE, end_date: datetime = END_DATE) -> dict[str, SourceSheet]:
+    wb = load_workbook(source_file, data_only=True, read_only=True)
+    data: dict[str, SourceSheet] = {}
+    for order, name in enumerate(wb.sheetnames):
+        data[name] = load_source_sheet(wb[name], order, start_date, end_date)
+    return data
 
-# 保存
-wb.save(OUTPUT_FILE)
-print(f"\n文件已保存: {OUTPUT_FILE}")
-print("完成！")
+
+def first_sheet(data: dict[str, SourceSheet], keyword: str) -> SourceSheet:
+    return next(sheet for name, sheet in data.items() if keyword in name)
+
+
+def rows_with_category(ws) -> dict[int, str]:
+    current = ""
+    categories = {}
+    for row in range(2, ws.max_row + 1):
+        value = clean_text(ws.cell(row, 2).value)
+        if value:
+            current = value
+        categories[row] = current
+    return categories
+
+
+def same_category_detail_rows(ws, categories: dict[int, str], row: int) -> list[int]:
+    category = categories[row]
+    detail_rows = []
+    for candidate in range(row + 1, ws.max_row + 1):
+        if categories[candidate] != category:
+            break
+        label = clean_text(ws.cell(candidate, 3).value)
+        if label and label != "合计":
+            detail_rows.append(candidate)
+    return detail_rows
+
+
+def build_value_resolver(data: dict[str, SourceSheet], ws, categories: dict[int, str]) -> Callable:
+    resident = first_sheet(data, "居民")
+    social = first_sheet(data, "社会")
+    restaurant = first_sheet(data, "餐饮")
+    transfer = first_sheet(data, "中转")
+
+    resident_aliases = {
+        "无桶站公示牌或桶站公示牌设置不合格": "无桶站公示牌或桶站公示牌不合格",
+        "大件、装修垃圾投放点周边环境脏乱": "桶站周边不洁",
+        "小区内无大件垃圾托底上门回收渠道公示或告知": "未公示收集点位和收集时间",
+        "无灭蝇措施": "无灭蚊蝇设施",
+        "车辆未密闭、破损滴漏脏污，标志与车牌不清晰": "车辆未密闭、破损滴漏脏污，无标识、标志与车牌不清晰",
+        "散桶": "散桶",
+        "站外摆桶": "站外摆桶",
+    }
+    social_aliases = {
+        "容器破损、脏污等": "容器容器破损",
+        "食品加工区厨余、其他容器设置不齐": "食品加工区厨余和其他容器设置不齐",
+        "无称重计量列表": "无称重计量",
+        "容器标识不合格": "容器标识不合格",
+    }
+    restaurant_aliases = {
+        "桶站周边不洁": "桶站周边不洁",
+        "容器无标识或标识不合格": "容器无标识或标识不合格",
+        "食品加工区厨余、其他容器设置不齐": "食品加工区厨余和其他容器设置不齐",
+        "无称重计量小程序": "无称重计量",
+    }
+    transfer_aliases = {
+        "无消防安全水源": "无消防安全水源",
+        "周边环境脏乱": "周边环境脏乱",
+    }
+
+    def source_for(row: int) -> SourceSheet | None:
+        category = categories[row]
+        if category in ("分类设施建设达标情况", "分类设施管理达标情况", "居民自主投放情况", "纯净率", "值守率", "检查小区桶站组数", "居民小区问题整改情况"):
+            return resident
+        if category == "社会单位检查情况":
+            return social
+        if category == "餐饮单位检查情况":
+            return restaurant
+        if category == "中转站":
+            return transfer
+        return None
+
+    def mapped_metric(sheet: SourceSheet, metric: str) -> str:
+        key = metric_key(metric)
+        if sheet is resident:
+            return resident_aliases.get(key, key)
+        if sheet is social:
+            return social_aliases.get(key, key)
+        if sheet is restaurant:
+            return restaurant_aliases.get(key, key)
+        if sheet is transfer:
+            return transfer_aliases.get(key, key)
+        return key
+
+    source_metric_owner: dict[tuple[str, int, str], tuple[int, bool]] = {}
+    for owner_row in range(2, ws.max_row + 1):
+        owner_metric = clean_text(ws.cell(owner_row, 3).value)
+        if not owner_metric or owner_metric == "合计":
+            continue
+        owner_category = categories[owner_row]
+        owner_sheet = source_for(owner_row)
+        if owner_sheet is None:
+            continue
+        owner_source_metric = mapped_metric(owner_sheet, owner_metric)
+        owner_is_exact = metric_key(owner_metric) == owner_source_metric
+        owner_key = (owner_category, id(owner_sheet), owner_source_metric)
+        current = source_metric_owner.get(owner_key)
+        if current is None or (owner_is_exact and not current[1]):
+            source_metric_owner[owner_key] = (owner_row, owner_is_exact)
+
+    def value(row: int, street: str, cache: dict[tuple[int, str], float | None], missing: list[str]) -> float | None:
+        cache_key = (row, street_key(street))
+        if cache_key in cache:
+            return cache[cache_key]
+
+        metric = clean_text(ws.cell(row, 3).value)
+        category = categories[row]
+        sheet = source_for(row)
+        result: float | None
+
+        if metric == "合计":
+            result = sum(value(detail_row, street, cache, missing) or 0 for detail_row in same_category_detail_rows(ws, categories, row))
+        elif category == "居民小区问题整改情况" and metric == "居民小区、胡同整改率":
+            result = 1
+        elif category == "居民小区问题整改情况" and metric == "检查数":
+            result = resident.date_street_count(street)
+        elif category == "居民小区问题整改情况" and metric == "已整改数":
+            result = resident.date_street_count(street)
+        elif category == "居民小区问题整改情况" and metric == "未整改数":
+            result = 0
+        elif category == "居民自主投放情况" and metric == "投放准确率":
+            bad = resident.sum_metric(street, "居民自主投放不准确") or 0
+            total = resident.default_resident_vote_total(street)
+            result = 1 - bad / total if total else 1
+        elif category == "纯净率":
+            bad = resident.sum_metric(street, "桶内分类不纯净") or 0
+            total = resident.sum_indexes(street, [resident.resident_bin_total_index]) if resident.resident_bin_total_index is not None else 0
+            result = 1 - bad / total if total else 1
+        elif category == "值守率":
+            bad = resident.sum_metric(street, "无人值守") or 0
+            total = resident.sum_indexes(street, [resident.resident_station_group_index]) if resident.resident_station_group_index is not None else 0
+            result = 1 - bad / total if total else 1
+        elif category == "检查小区桶站组数":
+            result = resident.sum_indexes(street, [resident.resident_station_group_index]) if resident.resident_station_group_index is not None else None
+        elif category == "社会单位检查情况" and metric == "社会单位检查问题数":
+            result = social.issue_total(street)
+        elif category == "餐饮单位检查情况" and metric == "餐饮单位检查问题数":
+            result = restaurant.issue_total(street)
+        elif category == "市级检查情况" and metric == "检查小区数":
+            result = resident.point_count(street)
+        elif category == "市级检查情况" and metric == "检查社会单位数":
+            result = social.point_count(street)
+        elif category == "市级检查情况" and metric == "市级检查问题数":
+            result = resident.issue_total(street) + social.issue_total(street) + restaurant.issue_total(street)
+        elif sheet is not None:
+            source_metric = mapped_metric(sheet, metric)
+            owner = source_metric_owner.get((category, id(sheet), source_metric))
+            if owner is not None and owner[0] != row:
+                result = 0
+            else:
+                result = sheet.sum_metric(street, source_metric)
+            if result is None:
+                missing.append(f"第{row}行 [{category}] {metric} -> {sheet.name}")
+                result = 0
+        else:
+            result = 0
+            missing.append(f"第{row}行 [{category}] {metric} -> 未确定源表")
+
+        cache[cache_key] = result
+        return result
+
+    return value
+
+
+def fill_sheet1(wb, data: dict[str, SourceSheet]) -> list[str]:
+    ws = wb["Sheet1"]
+    street_columns = [
+        (col, clean_text(ws.cell(1, col).value))
+        for col in range(4, ws.max_column + 1)
+        if clean_text(ws.cell(1, col).value)
+    ]
+    categories = rows_with_category(ws)
+    resolve_value = build_value_resolver(data, ws, categories)
+    missing: list[str] = []
+    cache: dict[tuple[int, str], float | None] = {}
+
+    for row in range(2, ws.max_row + 1):
+        category = categories[row]
+        metric = clean_text(ws.cell(row, 3).value)
+        if not metric and category != "检查小区桶站组数":
+            continue
+        for col, street in street_columns:
+            value = resolve_value(row, street, cache, missing)
+            cell = ws.cell(row, col)
+            if value is None:
+                cell.value = 0
+                continue
+            cell.value = round(value, 4) if isinstance(value, float) and not value.is_integer() else int(value)
+
+    return sorted(set(missing))
+
+
+def category_bounds(ws, category: str) -> tuple[int, int] | None:
+    wanted = clean_text(category)
+    current = ""
+    start = None
+    end = None
+    for row in range(2, ws.max_row + 1):
+        category_value = clean_text(ws.cell(row, 2).value)
+        if category_value:
+            current = category_value
+        if current == wanted:
+            if start is None:
+                start = row
+            end = row
+        elif start is not None:
+            break
+    if start is None or end is None:
+        return None
+    return start, end
+
+
+def copy_row_style(ws, source_row: int, target_row: int) -> None:
+    ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
+    for col in range(1, ws.max_column + 1):
+        source = ws.cell(source_row, col)
+        target = ws.cell(target_row, col)
+        if source.has_style:
+            target._style = copy(source._style)
+        if source.number_format:
+            target.number_format = source.number_format
+        if source.alignment:
+            target.alignment = copy(source.alignment)
+        if source.font:
+            target.font = copy(source.font)
+        if source.fill:
+            target.fill = copy(source.fill)
+        if source.border:
+            target.border = copy(source.border)
+
+
+def append_missing_issue_rows(wb, data: dict[str, SourceSheet]) -> list[str]:
+    ws = wb["Sheet1"]
+    street_columns = [
+        (col, clean_text(ws.cell(1, col).value))
+        for col in range(4, ws.max_column + 1)
+        if clean_text(ws.cell(1, col).value)
+    ]
+    issue_sections = [
+        ("社会单位检查情况", first_sheet(data, "社会"), {
+            "容器容器破损": "容器破损、脏污等",
+            "食品加工区厨余和其他容器设置不齐": "食品加工区厨余、其他容器设置不齐",
+            "无称重计量": "无称重计量列表",
+            "容器标识不合格": "容器标识不合格数",
+        }),
+        ("餐饮单位检查情况", first_sheet(data, "餐饮"), {
+            "容器无标识或标识不合格": "容器无标识或标识不合格数",
+            "食品加工区厨余和其他容器设置不齐": "食品加工区厨余、其他容器设置不齐",
+            "无称重计量": "无称重计量小程序",
+        }),
+    ]
+    inserted: list[str] = []
+    for category, sheet, aliases in issue_sections:
+        bounds = category_bounds(ws, category)
+        if bounds is None:
+            continue
+        start, end = bounds
+        existing = {
+            metric_key(ws.cell(row, 3).value)
+            for row in range(start, end + 1)
+            if clean_text(ws.cell(row, 3).value)
+        }
+        reusable_rows = [
+            row
+            for row in range(start, end + 1)
+            if clean_text(ws.cell(row, 3).value)
+            and clean_text(ws.cell(row, 3).value) not in {"社会单位检查问题数", "餐饮单位检查问题数"}
+            and sum(number(ws.cell(row, col).value) for col, _ in street_columns) == 0
+        ]
+        source_metrics = []
+        seen = set()
+        for idx in sheet.indicator_indexes:
+            if idx >= len(sheet.headers):
+                continue
+            source_metric = clean_text(sheet.headers[idx])
+            if not source_metric or source_metric in {"合计", "整改情况（已整改：0，未整改：1）"}:
+                continue
+            key = metric_key(source_metric)
+            if key in seen:
+                continue
+            seen.add(key)
+            display_metric = aliases.get(key, source_metric)
+            if metric_key(display_metric) in existing:
+                continue
+            values = {street: sheet.sum_metric(street, source_metric) or 0 for _, street in street_columns}
+            if sum(values.values()) <= 0:
+                continue
+            source_metrics.append((display_metric, values))
+
+        for (display_metric, values), target_row in zip(source_metrics, reusable_rows):
+            ws.cell(target_row, 3).value = display_metric
+            for col, street in street_columns:
+                value = values[street]
+                ws.cell(target_row, col).value = round(value, 4) if isinstance(value, float) and not value.is_integer() else int(value)
+            inserted.append(f"{category} / {display_metric}")
+            existing.add(metric_key(display_metric))
+        if len(source_metrics) > len(reusable_rows):
+            for display_metric, _ in source_metrics[len(reusable_rows):]:
+                inserted.append(f"{category} / {display_metric}（未写入：模板无可复用空行）")
+    return inserted
+
+
+def generate_summary(
+    source_file: Path,
+    template_file: Path,
+    start_date: datetime,
+    end_date: datetime,
+    output_file: Path | None = None,
+) -> dict:
+    output_file = output_file or DATA_DIR / output_name_for(end_date)
+    source_data = load_source_data(source_file, start_date, end_date)
+    wb = load_workbook(template_file, data_only=False)
+    missing = fill_sheet1(wb, source_data)
+    inserted_rows = append_missing_issue_rows(wb, source_data)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(output_file)
+    return {
+        "output_file": output_file,
+        "missing": missing,
+        "inserted_rows": inserted_rows,
+        "row_counts": {name: len(sheet.rows) for name, sheet in source_data.items()},
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+
+
+def main() -> None:
+    source_file = find_source_file()
+    template_file = find_template_file()
+    output_file = DATA_DIR / DEFAULT_OUTPUT_NAME
+
+    print(f"源台账: {source_file}")
+    print(f"模板: {template_file}")
+    print(f"输出: {output_file}")
+    print(f"日期范围: {START_DATE:%Y-%m-%d} 至 {END_DATE:%Y-%m-%d}")
+
+    result = generate_summary(source_file, template_file, START_DATE, END_DATE, output_file)
+
+    print("生成完成。")
+    for name, count in result["row_counts"].items():
+        print(f"- {name}: 筛选后 {count} 行")
+    if result["missing"]:
+        print("\n以下模板行没有找到明确源列，生成文件中对应数据格已留空，请补充映射后再生成：")
+        for item in result["missing"]:
+            print(f"- {item}")
+    else:
+        print("所有可填充模板行均已映射。")
+
+
+if __name__ == "__main__":
+    main()
