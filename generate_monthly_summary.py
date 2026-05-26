@@ -61,6 +61,12 @@ def street_key(value) -> str:
     aliases = {
         "西长安街": "西长安街街道",
         "什刹海街道": "什刹海街道",
+        "广外": "广安门外街道",
+        "广外街道": "广安门外街道",
+        "广安门外": "广安门外街道",
+        "广内": "广安门内街道",
+        "广内街道": "广安门内街道",
+        "广安门内": "广安门内街道",
     }
     if text in aliases:
         text = aliases[text]
@@ -472,6 +478,8 @@ def fill_sheet1(wb, data: dict[str, SourceSheet]) -> list[str]:
 
     for row in range(2, ws.max_row + 1):
         category = categories[row]
+        if category == "市级检查情况":
+            continue
         metric = clean_text(ws.cell(row, 3).value)
         if not metric and category != "检查小区桶站组数":
             continue
