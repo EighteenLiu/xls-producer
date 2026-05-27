@@ -486,6 +486,44 @@ INDEX_HTML = """<!doctype html>
           <div id="cityDownloads" class="download-list"></div>
         </form>
       </section>
+      <section class="report-block">
+        <h2 class="summary-title">更新中转站情况</h2>
+        <form id="transferForm">
+          <div class="field">
+            <label for="transfer_ledger">上传区：中转站台账</label>
+            <input id="transfer_ledger" name="transfer_ledger" type="file" accept=".xlsx,.xls" required />
+            <div class="hint">支持 xlsx / xls。程序会按所选时间段筛选日期，并按街道汇总中转站问题列。</div>
+          </div>
+          <div class="field">
+            <label for="transfer_summary">待修改文件区：已生成的月报汇总表</label>
+            <input id="transfer_summary" name="summary" type="file" accept=".xlsx" required />
+            <div class="hint">只更新汇总表中的“中转站”相关行，其他内容保持不变。</div>
+          </div>
+          <div class="grid">
+            <div class="field">
+              <label for="transfer_start_date">开始日期</label>
+              <input id="transfer_start_date" name="start_date" type="date" value="2026-04-20" required />
+            </div>
+            <div class="field">
+              <label for="transfer_end_date">结束日期</label>
+              <input id="transfer_end_date" name="end_date" type="date" value="2026-05-19" required />
+            </div>
+          </div>
+          <div class="field">
+            <label for="transfer_output_dir">输出区：更新后汇总表保存地址</label>
+            <div class="path-row">
+              <input id="transfer_output_dir" name="output_dir" type="text" value="D:/pycharm/xls-producer/web_work/outputs" required />
+              <button id="chooseTransferOutputDir" class="secondary" type="button">选择文件夹</button>
+            </div>
+            <div class="hint">默认使用上传汇总表的原文件名保存到该目录；同名文件会被覆盖。</div>
+          </div>
+          <div class="actions">
+            <button id="transferSubmit" type="submit">更新中转站情况</button>
+          </div>
+          <div id="transferStatus" class="status">等待上传中转站台账和待修改汇总表。</div>
+          <div id="transferDownloads" class="download-list"></div>
+        </form>
+      </section>
       <aside>
         <h2 class="summary-title">生成结果</h2>
         <div class="kv">
@@ -601,6 +639,14 @@ INDEX_HTML = """<!doctype html>
     const cityEndInput = document.getElementById("city_end_date");
     const cityOutputDirInput = document.getElementById("city_output_dir");
     const chooseCityOutputDir = document.getElementById("chooseCityOutputDir");
+    const transferForm = document.getElementById("transferForm");
+    const transferSubmit = document.getElementById("transferSubmit");
+    const transferStatus = document.getElementById("transferStatus");
+    const transferDownloads = document.getElementById("transferDownloads");
+    const transferStartInput = document.getElementById("transfer_start_date");
+    const transferEndInput = document.getElementById("transfer_end_date");
+    const transferOutputDirInput = document.getElementById("transfer_output_dir");
+    const chooseTransferOutputDir = document.getElementById("chooseTransferOutputDir");
     const homeView = document.getElementById("homeView");
     const summaryView = document.getElementById("summaryView");
     const reportView = document.getElementById("reportView");
@@ -713,6 +759,18 @@ INDEX_HTML = """<!doctype html>
         cityStatus.textContent = error.message;
       } finally {
         chooseCityOutputDir.disabled = false;
+      }
+    });
+
+    chooseTransferOutputDir.addEventListener("click", async () => {
+      chooseTransferOutputDir.disabled = true;
+      try {
+        await chooseDirectory(transferOutputDirInput);
+      } catch (error) {
+        transferStatus.className = "status error";
+        transferStatus.textContent = error.message;
+      } finally {
+        chooseTransferOutputDir.disabled = false;
       }
     });
 
@@ -852,6 +910,44 @@ INDEX_HTML = """<!doctype html>
         cityStatus.textContent = error.message;
       } finally {
         citySubmit.disabled = false;
+      }
+    });
+
+    transferForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      transferDownloads.innerHTML = "";
+
+      if (transferStartInput.value > transferEndInput.value) {
+        transferStatus.className = "status error";
+        transferStatus.textContent = "开始日期不能晚于结束日期。";
+        return;
+      }
+
+      transferSubmit.disabled = true;
+      transferStatus.className = "status";
+      transferStatus.textContent = "正在读取中转站台账并更新月汇总表，请稍候...";
+      try {
+        const body = new FormData(transferForm);
+        const response = await fetch("/update-transfer", { method: "POST", body });
+        const result = await response.json();
+        if (!response.ok || !result.ok) {
+          throw new Error(result.error || "更新失败");
+        }
+
+        transferStatus.className = "status ok";
+        const diagnostics = result.diagnostics || {};
+        const whiteSamples = (diagnostics.white_problem_samples || []).map((sample) => {
+          const metrics = (sample.matched_metrics || []).join("、") || "无";
+          const problems = (sample.problems || []).join("、") || "无";
+          return `白纸坊样例：日期=${sample.date || ""} 范围内=${sample.in_range ? "是" : "否"} 问题=${problems} 命中=${metrics}`;
+        }).join("\n");
+        transferStatus.textContent = `更新完成：${result.summary_filename}\n汇总表位置：${result.summary_path}\n更新中转站行：${result.updated.transfer_rows}\n识别街道数：${result.street_count}\n时间范围：${result.start_date} 至 ${result.end_date}\n诊断：工作表=${diagnostics.sheet || ""}，表头行=${diagnostics.header_row || ""}，日期列=${diagnostics.date_column || ""}，街道列=${diagnostics.street_column || ""}，具体问题列=${(diagnostics.problem_text_columns || []).join("、") || "无"}，范围内行=${diagnostics.rows_in_date_range || 0}/${diagnostics.rows_seen || 0}，白纸坊范围内行=${diagnostics.white_rows_in_date_range || 0}/${diagnostics.white_rows_seen || 0}${whiteSamples ? "\n" + whiteSamples : ""}`;
+        transferDownloads.innerHTML = `<a class="download" href="${result.summary_download_url}" download="${result.summary_filename}">下载更新后汇总表</a>`;
+      } catch (error) {
+        transferStatus.className = "status error";
+        transferStatus.textContent = error.message;
+      } finally {
+        transferSubmit.disabled = false;
       }
     });
   </script>
@@ -1371,6 +1467,407 @@ def update_summary_city_checks(
     return updated
 
 
+def find_transfer_sheet(wb):
+    for ws in wb.worksheets:
+        if "中转" in ws.title:
+            return ws
+    if len(wb.worksheets) == 1:
+        return wb.worksheets[0]
+    raise ValueError("中转站台账中未找到包含“中转”的工作表")
+
+
+def find_transfer_header_row(ws, max_scan_rows: int = 20) -> tuple[int, list[str]]:
+    def is_header(headers: list[str]) -> bool:
+        has_date = any("日期" in header or "时间" in header or "编号" in header for header in headers)
+        has_street = any("街道" in header or "三级点位" in header or "3级点位" in header for header in headers)
+        return has_date and has_street
+
+    for row in range(1, min(ws.max_row, max_scan_rows) + 1):
+        headers = [clean_text(ws.cell(row, col).value) for col in range(1, ws.max_column + 1)]
+        if is_header(headers):
+            return row, headers
+        if row > 1:
+            previous = [clean_text(ws.cell(row - 1, col).value) for col in range(1, ws.max_column + 1)]
+            merged = []
+            for top, bottom in zip(previous, headers):
+                if top and bottom and top not in bottom:
+                    merged.append(f"{top}{bottom}")
+                else:
+                    merged.append(bottom or top)
+            if is_header(merged):
+                return row, merged
+    raise ValueError(f"{ws.title} 未找到包含“编号/日期、三级点位/街道”的表头行")
+
+
+def find_transfer_date_index(headers: list[str]) -> int:
+    for keyword in ("检查日期", "日期", "时间", "编号"):
+        idx = optional_header_index(headers, keyword)
+        if idx is not None:
+            return idx
+    return 0
+
+
+def find_transfer_street_index(headers: list[str]) -> int:
+    for keyword in ("街道名称", "所属街道", "属地街道", "街道", "三级点位", "3级点位"):
+        idx = optional_header_index(headers, keyword)
+        if idx is not None:
+            return idx
+    raise ValueError("中转站台账中未找到街道列或三级点位列")
+
+
+def parse_transfer_date(value) -> datetime | None:
+    parsed = parse_date_like(value)
+    if parsed is not None:
+        return parsed
+    text = clean_text(value)
+    match = re.search(r"(20\d{2}|10\d{2})[-/.年]?(\d{1,2})[-/.月]?(\d{1,2})", text)
+    if match:
+        year = 2026 if match.group(1) == "1016" else int(match.group(1))
+        try:
+            return datetime(year, int(match.group(2)), int(match.group(3)))
+        except ValueError:
+            return None
+    match = re.search(r"(?<!\d)(\d{8})(?!\d)", text)
+    if match:
+        try:
+            parsed = datetime.strptime(match.group(1), "%Y%m%d")
+            if parsed.year == 1016:
+                parsed = parsed.replace(year=2026)
+            return parsed
+        except ValueError:
+            return None
+    return None
+
+
+def transfer_street_key(value) -> str:
+    text = clean_text(value)
+    if not text:
+        return ""
+    known = [
+        "西长安街", "新街口", "月坛", "展览路", "德胜", "金融街", "什刹海",
+        "大栅栏", "天桥", "椿树", "陶然亭", "广内", "牛街", "白纸坊",
+        "广外", "广安门外", "广安门内", "广安门",
+    ]
+    for name in sorted(known, key=len, reverse=True):
+        if name in text:
+            return street_key(name)
+    match = re.search(r"([\u4e00-\u9fa5]{1,12}?街道)", text)
+    if match:
+        return street_key(match.group(1))
+    return street_key(text)
+
+
+def transfer_metric_alias(metric: str) -> str:
+    key = metric_key(metric)
+    aliases = {
+        metric_key("消防水源不合格"): metric_key("无消防安全水源"),
+        metric_key("灭火器过期"): metric_key("灭火器不合格"),
+        metric_key("无灭蝇措施"): metric_key("无灭蝇措施"),
+        metric_key("灭蝇措施"): metric_key("无灭蝇措施"),
+        metric_key("灭蚊蝇设施"): metric_key("无灭蝇措施"),
+        metric_key("无灭蚊蝇设施"): metric_key("无灭蝇措施"),
+        metric_key("七禁收八不准"): metric_key("无七禁收八不准承诺书"),
+        metric_key("无七禁收八不准"): metric_key("无七禁收八不准承诺书"),
+        metric_key("堆放混乱"): metric_key("未按规定区域存放物品"),
+        metric_key("物品堆放混乱"): metric_key("未按规定区域存放物品"),
+        metric_key("计量称不能使用"): metric_key("称重系统损坏"),
+        metric_key("计量秤不能使用"): metric_key("称重系统损坏"),
+        metric_key("称重计量不能使用"): metric_key("称重系统损坏"),
+        metric_key("未配备电源箱"): metric_key("配电箱处堆放杂物"),
+        metric_key("未配备配电箱"): metric_key("配电箱处堆放杂物"),
+    }
+    return aliases.get(key, key)
+
+
+def transfer_metric_keyword_groups(metric: str) -> list[tuple[str, ...]]:
+    key = transfer_metric_alias(metric)
+    return transfer_metric_keyword_rules().get(key, [])
+
+
+def transfer_metric_keyword_rules() -> dict[str, list[tuple[str, ...]]]:
+    return {
+        metric_key("无安全风险公告"): [
+            ("安全风险公告",),
+            ("风险公告",),
+        ],
+        metric_key("无灭蝇措施"): [
+            ("灭蝇",),
+            ("灭蚊蝇",),
+            ("蚊蝇", "设施"),
+            ("蚊蝇", "措施"),
+        ],
+        metric_key("无七禁收八不准承诺书"): [
+            ("七禁收八不准",),
+            ("七禁", "八不准"),
+            ("八不准", "承诺"),
+        ],
+        metric_key("未按规定区域存放物品"): [
+            ("未按规定", "存放"),
+            ("规定区域", "存放"),
+            ("堆放混乱",),
+            ("物品", "堆放"),
+        ],
+        metric_key("配电箱处堆放杂物"): [
+            ("配电箱", "堆放"),
+            ("电源箱",),
+            ("配电箱",),
+        ],
+        metric_key("称重系统损坏"): [
+            ("称重", "损坏"),
+            ("称重", "不能使用"),
+            ("计量称", "不能使用"),
+            ("计量秤", "不能使用"),
+            ("计量", "不能使用"),
+        ],
+        metric_key("无消防安全水源"): [
+            ("消防", "水源"),
+        ],
+        metric_key("灭火器不合格"): [
+            ("灭火器", "不合格"),
+            ("灭火器", "过期"),
+            ("灭火器", "欠压"),
+        ],
+        metric_key("无备案公示"): [
+            ("备案公示",),
+            ("无备案",),
+        ],
+        metric_key("周边环境脏乱"): [
+            ("周边", "脏乱"),
+            ("周边", "不洁"),
+            ("环境", "脏乱"),
+        ],
+        metric_key("清运不及时、可回收物大量积存"): [
+            ("清运", "不及时"),
+            ("可回收物", "积存"),
+        ],
+    }
+
+
+def transfer_known_metric_keys() -> set[str]:
+    return {
+        metric_key("清运不及时、可回收物大量积存"),
+        metric_key("周边环境脏乱"),
+        metric_key("无可回收价格表"),
+        metric_key("无备案公示"),
+        metric_key("无消防安全水源"),
+        metric_key("无营业执照"),
+        metric_key("无安全风险公告"),
+        metric_key("称重系统损坏"),
+        metric_key("灭火器不合格"),
+        metric_key("未按规定区域存放物品"),
+        metric_key("无七禁收八不准承诺书"),
+        metric_key("配电箱处堆放杂物"),
+        metric_key("安全员未按时上岗"),
+        metric_key("安全员无明显身份标识"),
+        metric_key("未按时开门运行"),
+        metric_key("无企安安"),
+        metric_key("无灭蝇措施"),
+        *transfer_metric_keyword_rules().keys(),
+    }
+
+
+def is_transfer_indicator_header(header: str) -> bool:
+    key = metric_key(header)
+    if not key:
+        return False
+    skip_keywords = (
+        "检查日期", "日期", "时间", "街道", "点位", "名称", "运营主体", "具体问题", "问题描述",
+        "问题情况", "问题合计", "合计", "备注", "编号", "序号", "定位", "照片", "图片",
+        "指标", "检查员", "二维码",
+    )
+    return not any(keyword in key for keyword in skip_keywords)
+
+
+def transfer_problem_value(value) -> float:
+    text = clean_text(value)
+    if text == "1":
+        return 0.0
+    numeric = number(value)
+    if numeric:
+        return numeric
+    if not text or text in {"0", "否", "无", "不涉及", "nan", "None"}:
+        return 0.0
+    return 1.0
+
+
+def find_transfer_problem_text_indexes(headers: list[str]) -> list[int]:
+    keywords = ("具体问题", "问题描述", "问题情况", "存在问题", "检查问题")
+    return [
+        idx for idx, header in enumerate(headers)
+        if any(keyword in clean_text(header) for keyword in keywords)
+    ]
+
+
+def split_transfer_problem_text(value) -> list[str]:
+    text = clean_text(value)
+    empty_values = {"0", "1", "否", "无", "不涉及", "nan", "None", "无问题", "未发现问题"}
+    if not text or text in empty_values:
+        return []
+    parts = re.split(r"[;；,，、。.\n\r\t]+", text)
+    results = []
+    for part in parts:
+        item = re.sub(r"^[（(]?\d+[）)、.．]?", "", part.strip())
+        item = metric_key(item)
+        if item and item not in empty_values:
+            results.append(item)
+    return results or [metric_key(text)]
+
+
+def transfer_problem_matches(summary_metric: str, problem_text: str) -> bool:
+    metric = transfer_metric_alias(summary_metric)
+    problem = transfer_metric_alias(problem_text)
+    if not metric or not problem:
+        return False
+    if metric in problem or problem in metric:
+        return True
+    problem_key = metric_key(problem_text)
+    for group in transfer_metric_keyword_groups(metric):
+        if all(keyword in problem_key for keyword in group):
+            return True
+    return False
+
+
+def transfer_problem_metric_keys(problem_text: str) -> set[str]:
+    problem = transfer_metric_alias(problem_text)
+    known_metrics = transfer_known_metric_keys()
+    matched: set[str] = set()
+    if problem in known_metrics:
+        matched.add(problem)
+    for metric in known_metrics:
+        if transfer_problem_matches(metric, problem_text):
+            matched.add(metric)
+    return matched
+
+
+def read_transfer_station_stats(ledger_file: Path, start_date: datetime, end_date: datetime) -> dict[str, dict[str, float]]:
+    readable_file, temp_file = excel_file_for_openpyxl(ledger_file)
+    wb = load_workbook(readable_file, read_only=True, data_only=True)
+    stats: dict[str, dict[str, float]] = {}
+    diagnostics: dict[str, object] = {}
+    try:
+        ws = find_transfer_sheet(wb)
+        header_row, headers = find_transfer_header_row(ws)
+        date_idx = find_transfer_date_index(headers)
+        street_idx = find_transfer_street_index(headers)
+        problem_text_indexes = find_transfer_problem_text_indexes(headers)
+        indicator_indexes = [
+            idx for idx, header in enumerate(headers)
+            if idx not in (date_idx, street_idx) and is_transfer_indicator_header(header)
+        ]
+        if not problem_text_indexes and not indicator_indexes:
+            raise ValueError(f"{ws.title} 未找到“具体问题”列或可统计的问题列")
+
+        diagnostics = {
+            "sheet": ws.title,
+            "header_row": header_row,
+            "date_column": headers[date_idx] if date_idx < len(headers) else "",
+            "street_column": headers[street_idx] if street_idx < len(headers) else "",
+            "problem_text_columns": [headers[idx] for idx in problem_text_indexes],
+            "indicator_columns": [headers[idx] for idx in indicator_indexes[:30]],
+            "rows_seen": 0,
+            "rows_in_date_range": 0,
+            "rows_skipped_by_date": 0,
+            "rows_skipped_by_street": 0,
+            "white_rows_seen": 0,
+            "white_rows_in_date_range": 0,
+            "white_problem_samples": [],
+        }
+
+        for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+            diagnostics["rows_seen"] = int(diagnostics["rows_seen"]) + 1
+            checked_at = parse_transfer_date(row[date_idx] if date_idx < len(row) else None)
+            raw_street = row[street_idx] if street_idx < len(row) else None
+            street = transfer_street_key(raw_street)
+            problem_items: list[str] = []
+            for idx in problem_text_indexes:
+                problem_items.extend(split_transfer_problem_text(row[idx] if idx < len(row) else None))
+            if street == street_key("白纸坊"):
+                diagnostics["white_rows_seen"] = int(diagnostics["white_rows_seen"]) + 1
+                samples = diagnostics["white_problem_samples"]
+                if isinstance(samples, list) and len(samples) < 8 and problem_items:
+                    samples.append({
+                        "date": checked_at.strftime("%Y-%m-%d") if checked_at else clean_text(row[date_idx] if date_idx < len(row) else None),
+                        "in_range": bool(checked_at is not None and start_date <= checked_at <= end_date),
+                        "street": clean_text(raw_street),
+                        "problems": problem_items[:12],
+                        "matched_metrics": sorted({
+                            metric
+                            for problem in problem_items
+                            for metric in transfer_problem_metric_keys(problem)
+                        }),
+                    })
+            if checked_at is None or not (start_date <= checked_at <= end_date):
+                diagnostics["rows_skipped_by_date"] = int(diagnostics["rows_skipped_by_date"]) + 1
+                continue
+            diagnostics["rows_in_date_range"] = int(diagnostics["rows_in_date_range"]) + 1
+            if not street:
+                diagnostics["rows_skipped_by_street"] = int(diagnostics["rows_skipped_by_street"]) + 1
+                continue
+            if street == street_key("白纸坊"):
+                diagnostics["white_rows_in_date_range"] = int(diagnostics["white_rows_in_date_range"]) + 1
+            current = stats.setdefault(street, {"__record_count__": 0.0, "__issue_total__": 0.0, "__problem_texts__": []})
+            current["__record_count__"] += 1
+            if problem_items:
+                current["__problem_texts__"].extend(problem_items)
+                current["__issue_total__"] += len(problem_items)
+                for problem in problem_items:
+                    for metric in transfer_problem_metric_keys(problem):
+                        current[metric] = current.get(metric, 0.0) + 1
+            for idx in indicator_indexes:
+                value = transfer_problem_value(row[idx] if idx < len(row) else None)
+                if value == 0:
+                    continue
+                metric = transfer_metric_alias(headers[idx])
+                current[metric] = current.get(metric, 0.0) + value
+                current["__issue_total__"] += value
+    finally:
+        wb.close()
+        if temp_file is not None:
+            temp_file.unlink(missing_ok=True)
+
+    if not stats:
+        raise ValueError(f"{ledger_file.name} 在所选时间段内未解析到中转站数据")
+    stats["__diagnostics__"] = diagnostics
+    return stats
+
+
+def update_summary_transfer_station(summary_file: Path, output_file: Path, transfer_stats: dict[str, dict[str, float]]) -> dict[str, int]:
+    wb = load_workbook(summary_file)
+    ws = wb["Sheet1"] if "Sheet1" in wb.sheetnames else wb[wb.sheetnames[0]]
+    street_columns = [
+        (col, street_key(ws.cell(1, col).value))
+        for col in range(4, ws.max_column + 1)
+        if street_key(ws.cell(1, col).value)
+    ]
+    updated = {"transfer_rows": 0}
+    current_category = ""
+    for row in range(2, ws.max_row + 1):
+        category = clean_text(ws.cell(row, 2).value)
+        metric = clean_text(ws.cell(row, 3).value)
+        if category:
+            current_category = category
+        if current_category != "中转站" or not metric:
+            continue
+        metric = transfer_metric_alias(metric)
+        for col, street in street_columns:
+            values = transfer_stats.get(street, {})
+            value = values.get(metric, 0)
+            if not value:
+                problem_texts = values.get("__problem_texts__", [])
+                value = sum(1 for problem in problem_texts if transfer_problem_matches(metric, problem))
+            ws.cell(row, col).value = value
+        updated["transfer_rows"] += 1
+
+    if updated["transfer_rows"] == 0:
+        wb.close()
+        raise ValueError("月汇总表中未找到“中转站”相关行")
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(output_file)
+    wb.close()
+    return updated
+
+
 def choose_output_directory(current: str | None = None) -> str:
     try:
         import tkinter as tk
@@ -1425,6 +1922,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if path == "/update-city":
             self.update_city_checks()
+            return
+        if path == "/update-transfer":
+            self.update_transfer_station()
             return
         if path == "/generate-reports":
             self.generate_report_docs()
@@ -1559,6 +2059,53 @@ class AppHandler(BaseHTTPRequestHandler):
                     "updated": updated,
                     "resident_street_count": len(resident_stats),
                     "social_street_count": len(social_stats),
+                    "start_date": start_date.strftime("%Y-%m-%d"),
+                    "end_date": end_date.strftime("%Y-%m-%d"),
+                },
+            )
+        except Exception as exc:
+            json_response(self, 400, {"ok": False, "error": str(exc)})
+
+    def update_transfer_station(self) -> None:
+        try:
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ={
+                    "REQUEST_METHOD": "POST",
+                    "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                    "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
+                },
+            )
+            start_date = parse_ui_date(form.getfirst("start_date", ""))
+            end_date = parse_ui_date(form.getfirst("end_date", ""), end_of_day=True)
+            if start_date > end_date:
+                raise ValueError("开始日期不能晚于结束日期")
+
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+            output_dir = resolve_output_dir(form.getfirst("output_dir", ""))
+
+            summary_original_name = Path(form["summary"].filename or "summary.xlsx").name
+            summary_file = save_upload(form["summary"], UPLOAD_DIR, "summary.xlsx")
+            ledger_file = save_upload(form["transfer_ledger"], UPLOAD_DIR, "transfer_ledger.xlsx", (".xlsx", ".xls"))
+            output_file = output_dir / summary_original_name
+
+            transfer_stats = read_transfer_station_stats(ledger_file, start_date, end_date)
+            updated = update_summary_transfer_station(summary_file, output_file, transfer_stats)
+            diagnostics = transfer_stats.get("__diagnostics__", {})
+            street_count = len([key for key in transfer_stats if not str(key).startswith("__")])
+            json_response(
+                self,
+                200,
+                {
+                    "ok": True,
+                    "summary_filename": output_file.name,
+                    "summary_path": str(output_file),
+                    "summary_download_url": register_download(output_file),
+                    "updated": updated,
+                    "street_count": street_count,
+                    "diagnostics": diagnostics,
                     "start_date": start_date.strftime("%Y-%m-%d"),
                     "end_date": end_date.strftime("%Y-%m-%d"),
                 },
