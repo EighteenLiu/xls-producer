@@ -140,8 +140,11 @@ def find_template_file() -> Path:
         if path.name.startswith("~$") or path.name.endswith("_生成.xlsx"):
             continue
         wb = load_workbook(path, read_only=True, data_only=False)
-        if wb.sheetnames == TEMPLATE_SHEETS:
-            return path
+        try:
+            if wb.sheetnames == TEMPLATE_SHEETS or find_summary_template_sheet(wb) is not None:
+                return path
+        finally:
+            wb.close()
     raise FileNotFoundError("未找到包含 Sheet1/Sheet2 的汇总模板文件")
 
 
@@ -464,8 +467,36 @@ def build_value_resolver(data: dict[str, SourceSheet], ws, categories: dict[int,
     return value
 
 
+def find_summary_template_sheet(wb):
+    if "Sheet1" in wb.sheetnames:
+        return wb["Sheet1"]
+    for ws in wb.worksheets:
+        street_headers = [
+            clean_text(ws.cell(1, col).value)
+            for col in range(4, ws.max_column + 1)
+            if street_key(ws.cell(1, col).value)
+        ]
+        category_hits = 0
+        metric_hits = 0
+        for row in range(2, min(ws.max_row, 120) + 1):
+            category = clean_text(ws.cell(row, 2).value)
+            metric = clean_text(ws.cell(row, 3).value)
+            if category in {
+                "分类设施建设达标情况", "分类设施管理达标情况", "中转站",
+                "社会单位检查情况", "餐饮单位检查情况",
+            }:
+                category_hits += 1
+            if metric:
+                metric_hits += 1
+        if len(street_headers) >= 5 and category_hits >= 2 and metric_hits >= 10:
+            return ws
+    return wb[wb.sheetnames[0]] if wb.sheetnames else None
+
+
 def fill_sheet1(wb, data: dict[str, SourceSheet]) -> list[str]:
-    ws = wb["Sheet1"]
+    ws = find_summary_template_sheet(wb)
+    if ws is None:
+        raise ValueError("汇总模板中未找到可写入的工作表")
     street_columns = [
         (col, clean_text(ws.cell(1, col).value))
         for col in range(4, ws.max_column + 1)
@@ -534,7 +565,9 @@ def copy_row_style(ws, source_row: int, target_row: int) -> None:
 
 
 def append_missing_issue_rows(wb, data: dict[str, SourceSheet]) -> list[str]:
-    ws = wb["Sheet1"]
+    ws = find_summary_template_sheet(wb)
+    if ws is None:
+        raise ValueError("汇总模板中未找到可写入的工作表")
     street_columns = [
         (col, clean_text(ws.cell(1, col).value))
         for col in range(4, ws.max_column + 1)
